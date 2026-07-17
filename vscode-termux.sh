@@ -22,6 +22,7 @@ CONFIG_DIR="$HOME/.config/code-server"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 INSTALL_DIR="$HOME/.local/lib/code-server"
 BIN_DIR="$HOME/.local/bin"
+TEMP_DIR="$HOME/.tmp"
 
 # code-server version to install
 CODE_SERVER_VERSION="4.98.2"
@@ -111,7 +112,7 @@ else
     print_info "Download URL: $DOWNLOAD_URL"
     
     # Create directories
-    mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+    mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$TEMP_DIR"
     
     # Download using curl (follows redirects)
     cd "$HOME"
@@ -137,14 +138,22 @@ else
         print_success "Extracted successfully"
     else
         print_warn "Standard extraction had issues, trying alternative..."
-        # Alternative: extract to temp then copy
+        # Alternative: extract to temp dir in HOME then copy
         rm -rf "$INSTALL_DIR"
         mkdir -p "$INSTALL_DIR"
-        TEMP_DIR="/tmp/codeserver-$$"
-        mkdir -p "$TEMP_DIR"
-        tar -xzf "$TAR_FILE" --strip-components=1 -C "$TEMP_DIR" 2>/dev/null || true
-        cp -r "$TEMP_DIR"/* "$INSTALL_DIR/" 2>/dev/null || true
-        rm -rf "$TEMP_DIR"
+        EXTRACT_TEMP="$TEMP_DIR/codeserver-extract"
+        rm -rf "$EXTRACT_TEMP"
+        mkdir -p "$EXTRACT_TEMP"
+        tar -xzf "$TAR_FILE" --strip-components=1 -C "$EXTRACT_TEMP" 2>/dev/null || true
+        if [ -d "$EXTRACT_TEMP" ] && [ "$(ls -A "$EXTRACT_TEMP" 2>/dev/null)" ]; then
+            cp -r "$EXTRACT_TEMP"/* "$INSTALL_DIR/" 2>/dev/null || true
+            rm -rf "$EXTRACT_TEMP"
+            print_success "Extracted using alternative method"
+        else
+            print_error "Extraction failed completely"
+            rm -f "$TAR_FILE"
+            exit 1
+        fi
     fi
     
     rm -f "$TAR_FILE"
