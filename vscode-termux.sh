@@ -1,203 +1,548 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
-# VS Code: Server One-Command Setup for Termux (Tablet Edition)
-# Usage: bash <(curl -sL https://raw.githubusercontent.com/sireenyadav/Vscode-termux/main/vscode-termux.sh)
+# code-server for Termux (tablet-friendly)
+# - Installs from the official Termux tur repository
+# - Avoids npm on Termux (native module build issues)
+# - Idempotent install/repair/start/stop/status/uninstall
+# - Safe config generation with password preservation
 # ============================================================
 
-set -e
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+APP_NAME="code-server-termux"
+PORT="${PORT:-8080}"
+BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
+PASSWORD="${PASSWORD:-}"
+LAUNCH_AFTER_INSTALL=1
+FORCE_REINSTALL=0
+PURGE_CONFIG=0
+DOCKER_MODE=0
 
-# Configuration
-PORT=8080
-BIND_ADDR="127.0.0.1"
-PASSWORD="12345678"
-CONFIG_DIR="$HOME/.config/code-server"
-CONFIG_FILE="$CONFIG_DIR/config.yaml"
+CONFIG_DIR="${HOME}/.config/code-server"
+CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+START_SCRIPT="${HOME}/start-vscode"
+STOP_SCRIPT="${HOME}/stop-vscode"
+STATUS_SCRIPT="${HOME}/status-vscode"
+DOCTOR_SCRIPT="${HOME}/doctor-vscode"
+LOG_DIR="${HOME}/.local/share/code-server/coder-logs"
+STATE_DIR="${HOME}/.local/state/${APP_NAME}"
+LAST_ERROR_LOG="${STATE_DIR}/last-error.log"
 
-# Helper Functions
+TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+NC=$'\033[0m'
+
 print_header() {
-    echo ""
-    echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}  $1${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
+  echo
+  echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
+  echo -e "${CYAN}  $1${NC}"
+  echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
 }
 
-print_success() { echo -e "${GREEN}✅ $1${NC}"; }
-print_error()   { echo -e "${RED}❌ $1${NC}"; }
-print_info()    { echo -e "${BLUE}ℹ️  $1${NC}"; }
-print_warn()    { echo -e "${YELLOW}⚠️  $1${NC}"; }
-print_step()    { echo -e "${CYAN}→ $1${NC}"; }
+ok()   { echo -e "${GREEN}✅ $*${NC}"; }
+info() { echo -e "${BLUE}ℹ️  $*${NC}"; }
+warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
+err()  { echo -e "${RED}❌ $*${NC}" >&2; }
 
-# Step 1: System Check
-print_header "Step 1/5: System Environment Check"
+die() {
+  err "$*"
+  exit 1
+}
 
-if [ -z "$TERMUX_VERSION" ] && [ ! -d "/data/data/com.termux" ]; then
-    print_warn "Not running in Termux. Some features may not work."
-else
-    print_success "Termux environment detected"
-fi
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
 
-ARCH=$(uname -m)
-print_info "Architecture: $ARCH"
+is_termux() {
+  [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]
+}
 
-STORAGE=$(df -h $HOME | tail -1 | awk '{print $4}')
-print_info "Available storage: $STORAGE"
+timestamp() {
+  date +"%Y%m%d-%H%M%S"
+}
 
-# Step 2: Install Dependencies
-print_header "Step 2/5: Installing Dependencies"
+backup_file_if_exists() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    local backup="${file}.backup.$(timestamp)"
+    cp -f "$file" "$backup"
+    info "Backed up $(basename "$file") -> $(basename "$backup")"
+  fi
+}
 
-print_step "Updating package lists..."
-pkg update -y || { print_error "Failed to update packages"; exit 1; }
+generate_password() {
+  if have openssl; then
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16
+    echo
+  else
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16
+    echo
+  fi
+}
 
-print_step "Installing nodejs-lts and curl..."
-pkg install -y nodejs-lts curl || { print_error "Failed to install dependencies"; exit 1; }
+get_existing_password() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    awk -F': *' '/^password:/ {gsub(/"/,"",$2); print $2; exit}' "$CONFIG_FILE" || true
+  fi
+}
 
-print_success "Dependencies installed"
+ensure_dirs() {
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+  mkdir -p "$LOG_DIR" || true
+}
 
-# Step 3: Install code-server via npm
-print_header "Step 3/5: Installing code-server via npm"
-
-# Check if code-server is installed AND actually works
-if command -v code-server >/dev/null 2>&1 && code-server --version >/dev/null 2>&1; then
-    CURRENT_VERSION=$(code-server --version 2>/dev/null | head -1)
-    print_success "code-server already installed and working: $CURRENT_VERSION"
-    print_info "Location: $(command -v code-server)"
-else
-    print_step "Installing code-server via npm..."
-    
-    # Ensure npm global bin is in PATH
-    NPM_PREFIX=$(npm prefix -g)
-    NPM_BIN="$NPM_PREFIX/bin"
-    
-    if ! echo "$PATH" | grep -q "$NPM_BIN"; then
-        echo "export PATH=\"$NPM_BIN:\$PATH\"" >> "$HOME/.bashrc"
-        export PATH="$NPM_BIN:$PATH"
-        print_info "Added npm global bin to PATH"
-    fi
-    
-    # Install code-server globally
-    npm install -g code-server || {
-        print_error "npm install failed. Trying with --force..."
-        npm install -g code-server --force || {
-            print_error "Installation failed completely"
-            exit 1
-        }
-    }
-    
-    # Verify installation
-    if command -v code-server >/dev/null 2>&1 && code-server --version >/dev/null 2>&1; then
-        print_success "code-server installed successfully!"
-        code-server --version | head -1
-    else
-        print_error "Installation verification failed"
-        exit 1
-    fi
-fi
-
-# Step 4: Configure code-server
-print_header "Step 4/5: Configuring code-server"
-
-mkdir -p "$CONFIG_DIR"
-
-if [ -f "$CONFIG_FILE" ]; then
-    cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%s)"
-    print_info "Old config backed up"
-fi
-
-if [ -f "$CONFIG_FILE" ]; then
-    EXISTING_PASS=$(grep "password:" "$CONFIG_FILE" | awk '{print $2}' | tr -d '"')
-    if [ -n "$EXISTING_PASS" ]; then
-        PASSWORD="$EXISTING_PASS"
-        print_info "Using existing password from config"
-    fi
-fi
-
-cat > "$CONFIG_FILE" << EOF
+write_config() {
+  local pass="$1"
+  backup_file_if_exists "$CONFIG_FILE"
+  cat > "$CONFIG_FILE" <<EOF
 bind-addr: ${BIND_ADDR}:${PORT}
 auth: password
-password: ${PASSWORD}
+password: ${pass}
 cert: false
+disable-telemetry: true
 EOF
+  chmod 600 "$CONFIG_FILE"
+}
 
-print_success "Config written to $CONFIG_FILE"
-print_info "Port: $PORT"
-print_info "Password: $PASSWORD"
+ensure_bashrc_alias() {
+  local marker_start="# >>> ${APP_NAME} >>>"
+  local marker_end="# <<< ${APP_NAME} <<<"
+  local block
+  block="$(cat <<EOF
+${marker_start}
+function vs() { bash "${START_SCRIPT}" "\$@"; }
+${marker_end}
+EOF
+)"
+  if [[ -f "${HOME}/.bashrc" ]]; then
+    if ! grep -Fq "$marker_start" "${HOME}/.bashrc"; then
+      {
+        echo
+        echo "$block"
+      } >> "${HOME}/.bashrc"
+      ok "Added 'vs' helper to ~/.bashrc"
+    fi
+  fi
+}
 
-# Step 5: Create Shortcuts & Launch
-print_header "Step 5/5: Creating Shortcuts & Launching"
+install_termux_deps() {
+  print_header "Step 1/4: Termux setup"
 
-START_SCRIPT="$HOME/start-vscode"
-cat > "$START_SCRIPT" << 'EOF'
+  if ! is_termux; then
+    die "This installer is for Termux only."
+  fi
+
+  info "Termux detected"
+  info "Architecture: $(uname -m)"
+  info "Prefix: ${TERMUX_PREFIX}"
+
+  if ! have pkg; then
+    die "Termux pkg tool not found."
+  fi
+
+  info "Updating package lists..."
+  if ! pkg update -y; then
+    die "pkg update failed. Fix your Termux repositories first, then rerun."
+  fi
+
+  if ! dpkg -s tur-repo >/dev/null 2>&1; then
+    info "Installing tur-repo..."
+    if ! pkg install -y tur-repo; then
+      die "Failed to install tur-repo. Try 'termux-change-repo' and rerun."
+    fi
+  else
+    ok "tur-repo already installed"
+  fi
+
+  if [[ "$FORCE_REINSTALL" -eq 1 ]]; then
+    warn "Forcing reinstall of code-server package..."
+    pkg uninstall -y code-server >/dev/null 2>&1 || true
+  fi
+
+  if ! dpkg -s code-server >/dev/null 2>&1; then
+    info "Installing code-server from Termux repositories..."
+    if ! pkg install -y code-server; then
+      err "code-server package install failed."
+      echo
+      echo "Available matches:"
+      pkg search code-server || true
+      echo
+      die "Stop here. This script will not fall back to npm on Termux because the native build path is what failed in your log."
+    fi
+  else
+    ok "code-server package already installed"
+  fi
+
+  if ! have code-server; then
+    die "code-server is installed but not on PATH."
+  fi
+
+  if ! code-server --version >/dev/null 2>&1; then
+    die "code-server exists but does not run correctly."
+  fi
+
+  ok "code-server is installed and working"
+  info "Binary: $(command -v code-server)"
+  info "Version: $(code-server --version 2>/dev/null | head -n1 || true)"
+}
+
+configure_code_server() {
+  print_header "Step 2/4: Configure code-server"
+
+  ensure_dirs
+
+  local existing_pass
+  existing_pass="$(get_existing_password || true)"
+
+  if [[ -n "${PASSWORD}" ]]; then
+    info "Using password supplied via environment/flag"
+  elif [[ -n "${existing_pass}" ]]; then
+    PASSWORD="$existing_pass"
+    info "Preserving existing password from config"
+  else
+    PASSWORD="$(generate_password)"
+    info "Generated a new password"
+  fi
+
+  write_config "$PASSWORD"
+  ok "Config written: $CONFIG_FILE"
+  info "Bind address: ${BIND_ADDR}:${PORT}"
+  info "Password: ${PASSWORD}"
+}
+
+create_helper_scripts() {
+  print_header "Step 3/4: Create shortcuts"
+
+  cat > "$START_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
-CONFIG_FILE="$HOME/.config/code-server/config.yaml"
+set -Eeuo pipefail
+CONFIG_FILE="$CONFIG_FILE"
+DEFAULT_WORKSPACE="\${1:-\$PWD}"
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "❌ Config not found. Run the setup script first."
-    exit 1
+if [[ ! -f "\$CONFIG_FILE" ]]; then
+  echo "❌ Config not found: \$CONFIG_FILE"
+  exit 1
 fi
 
-PORT=$(grep "bind-addr:" "$CONFIG_FILE" | cut -d':' -f3 | tr -d ' ')
-PASS=$(grep "password:" "$CONFIG_FILE" | awk '{print $2}' | tr -d '"')
+echo "🚀 Starting code-server..."
+echo "   URL: http://${BIND_ADDR}:${PORT}"
+echo "   Config: \$CONFIG_FILE"
+echo
 
-echo "🚀 Starting VS Code: Server..."
-echo "   URL: http://127.0.0.1:${PORT:-8080}"
-echo "   Password: $PASS"
-echo ""
-
-code-server --config "$CONFIG_FILE"
+exec code-server --config "\$CONFIG_FILE" "\$DEFAULT_WORKSPACE"
 EOF
-chmod +x "$START_SCRIPT"
-print_success "Created: $START_SCRIPT"
+  chmod +x "$START_SCRIPT"
+  ok "Created: $START_SCRIPT"
 
-if ! grep -q "alias vs=" "$HOME/.bashrc"; then
-    echo "" >> "$HOME/.bashrc"
-    echo "# VS Code: Server alias" >> "$HOME/.bashrc"
-    echo "alias vs='bash $START_SCRIPT'" >> "$HOME/.bashrc"
-    print_success "Added 'vs' alias to ~/.bashrc"
-fi
-
-STOP_SCRIPT="$HOME/stop-vscode"
-cat > "$STOP_SCRIPT" << 'EOF'
+  cat > "$STOP_SCRIPT" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
-pkill -f code-server && echo "🛑 VS Code: Server stopped" || echo "ℹ️  Not running"
-EOF
-chmod +x "$STOP_SCRIPT"
-print_success "Created: $STOP_SCRIPT"
+set -Eeuo pipefail
 
-# Launch
-if pgrep -f "code-server" > /dev/null; then
-    print_warn "code-server is already running!"
-    print_info "Visit: http://${BIND_ADDR}:${PORT}"
-    print_info "Password: $PASSWORD"
-    echo ""
-    print_step "To stop: $STOP_SCRIPT"
-    print_step "To restart: $START_SCRIPT"
-    exit 0
+if pgrep -af 'code-server' >/dev/null 2>&1; then
+  pkill -f 'code-server' && echo "🛑 code-server stopped"
+else
+  echo "ℹ️  code-server not running"
+fi
+EOF
+  chmod +x "$STOP_SCRIPT"
+  ok "Created: $STOP_SCRIPT"
+
+  cat > "$STATUS_SCRIPT" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+echo "code-server status:"
+if pgrep -af 'code-server' >/dev/null 2>&1; then
+  echo "  Running"
+  echo "  URL: http://${BIND_ADDR}:${PORT}"
+else
+  echo "  Not running"
 fi
 
-print_step "Starting server..."
-echo ""
-echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  🎉 VS Code: Server is starting!${NC}"
-echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo ""
-echo -e "  📱 Open your tablet browser and go to:"
-echo -e "  ${CYAN}http://${BIND_ADDR}:${PORT}${NC}"
-echo ""
-echo -e "  🔑 Password: ${YELLOW}$PASSWORD${NC}"
-echo ""
-echo -e "  💡 Quick commands:"
-echo -e "     Start: ${CYAN}~/start-vscode${NC} or ${CYAN}vs${NC}"
-echo -e "     Stop:  ${CYAN}~/stop-vscode${NC}"
-echo ""
-echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo ""
+if [[ -f "$CONFIG_FILE" ]]; then
+  echo "  Config: $CONFIG_FILE"
+fi
+EOF
+  chmod +x "$STATUS_SCRIPT"
+  ok "Created: $STATUS_SCRIPT"
 
-code-server --config "$CONFIG_FILE"
+  cat > "$DOCTOR_SCRIPT" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+echo "Doctor check:"
+echo
+
+if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]; then
+  echo "✅ Termux detected"
+else
+  echo "❌ Not in Termux"
+fi
+
+if command -v code-server >/dev/null 2>&1; then
+  echo "✅ code-server found: $(command -v code-server)"
+  if code-server --version >/dev/null 2>&1; then
+    echo "✅ code-server runs"
+  else
+    echo "❌ code-server binary exists but fails to run"
+  fi
+else
+  echo "❌ code-server not on PATH"
+fi
+
+if [[ -f "$HOME/.config/code-server/config.yaml" ]]; then
+  echo "✅ config exists: $HOME/.config/code-server/config.yaml"
+else
+  echo "❌ config missing"
+fi
+
+if [[ -d "$HOME/.local/share/code-server/coder-logs" ]]; then
+  echo "✅ log directory exists"
+else
+  echo "ℹ️  log directory not found yet"
+fi
+EOF
+  chmod +x "$DOCTOR_SCRIPT"
+  ok "Created: $DOCTOR_SCRIPT"
+
+  ensure_bashrc_alias
+}
+
+show_hints() {
+  print_header "Step 4/4: Launch"
+
+  echo "📱 Open your browser and go to:"
+  echo "   http://${BIND_ADDR}:${PORT}"
+  echo
+  echo "🔑 Password:"
+  echo "   ${PASSWORD}"
+  echo
+  echo "💡 Commands:"
+  echo "   Start:   bash ~/start-vscode"
+  echo "   Stop:    bash ~/stop-vscode"
+  echo "   Status:  bash ~/status-vscode"
+  echo "   Doctor:  bash ~/doctor-vscode"
+  echo
+}
+
+tail_logs_if_any() {
+  if [[ -d "$LOG_DIR" ]]; then
+    local latest
+    latest="$(find "$LOG_DIR" -type f 2>/dev/null | sort | tail -n 1 || true)"
+    if [[ -n "${latest:-}" && -f "$latest" ]]; then
+      echo
+      info "Last log file: $latest"
+      tail -n 40 "$latest" || true
+    fi
+  fi
+}
+
+launch_now() {
+  if pgrep -af 'code-server' >/dev/null 2>&1; then
+    warn "code-server is already running"
+    info "Visit: http://${BIND_ADDR}:${PORT}"
+    return 0
+  fi
+
+  show_hints
+  exec code-server --config "$CONFIG_FILE" "$PWD"
+}
+
+stop_server() {
+  if pgrep -af 'code-server' >/dev/null 2>&1; then
+    pkill -f 'code-server' && ok "Stopped code-server"
+  else
+    info "code-server is not running"
+  fi
+}
+
+status_server() {
+  if pgrep -af 'code-server' >/dev/null 2>&1; then
+    ok "code-server is running"
+    info "URL: http://${BIND_ADDR}:${PORT}"
+  else
+    warn "code-server is not running"
+  fi
+}
+
+doctor() {
+  echo "Doctor:"
+  echo
+  if is_termux; then
+    ok "Termux detected"
+  else
+    warn "Not running inside Termux"
+  fi
+  echo "code-server: $(command -v code-server 2>/dev/null || echo 'missing')"
+  if have code-server; then
+    code-server --version 2>/dev/null | head -n1 || true
+  fi
+  echo "config: ${CONFIG_FILE}"
+  [[ -f "$CONFIG_FILE" ]] && ok "present" || warn "missing"
+  echo "logs: ${LOG_DIR}"
+  [[ -d "$LOG_DIR" ]] && ok "present" || warn "not created yet"
+  echo
+  tail_logs_if_any
+}
+
+uninstall_generated_files() {
+  print_header "Uninstall generated files"
+
+  rm -f "$START_SCRIPT" "$STOP_SCRIPT" "$STATUS_SCRIPT" "$DOCTOR_SCRIPT"
+  rm -f "${HOME}/.bashrc.tmp" >/dev/null 2>&1 || true
+
+  if [[ "$PURGE_CONFIG" -eq 1 ]]; then
+    rm -rf "$CONFIG_DIR"
+    ok "Removed config directory"
+  else
+    warn "Kept config directory. Use --purge-config to remove it."
+  fi
+
+  ok "Removed helper scripts"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  bash setup-code-server-termux.sh [options]
+
+Options:
+  --port PORT            Default: ${PORT}
+  --bind-addr ADDR       Default: ${BIND_ADDR}
+  --password PASS        Use a fixed password
+  --no-launch            Install and configure, but do not start server
+  --force-reinstall      Reinstall code-server package
+  --purge-config         Uninstall config files when using --uninstall
+  --install              Install mode (default)
+  --start                Start code-server using existing config
+  --stop                 Stop running code-server
+  --status               Show running status
+  --doctor               Run checks
+  --uninstall            Remove generated scripts/config
+  -h, --help             Show this help
+
+Examples:
+  bash <(curl -fsSL https://raw.githubusercontent.com/yourname/yourrepo/main/setup.sh)
+  PORT=9090 bash setup-code-server-termux.sh
+  bash setup-code-server-termux.sh --no-launch
+EOF
+}
+
+parse_args() {
+  local cmd="install"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        PORT="${2:-}"
+        [[ -n "$PORT" ]] || die "--port requires a value"
+        shift 2
+        ;;
+      --bind-addr)
+        BIND_ADDR="${2:-}"
+        [[ -n "$BIND_ADDR" ]] || die "--bind-addr requires a value"
+        shift 2
+        ;;
+      --password)
+        PASSWORD="${2:-}"
+        [[ -n "$PASSWORD" ]] || die "--password requires a value"
+        shift 2
+        ;;
+      --no-launch)
+        LAUNCH_AFTER_INSTALL=0
+        shift
+        ;;
+      --force-reinstall)
+        FORCE_REINSTALL=1
+        shift
+        ;;
+      --purge-config)
+        PURGE_CONFIG=1
+        shift
+        ;;
+      --install)
+        cmd="install"
+        shift
+        ;;
+      --start)
+        cmd="start"
+        shift
+        ;;
+      --stop)
+        cmd="stop"
+        shift
+        ;;
+      --status)
+        cmd="status"
+        shift
+        ;;
+      --doctor)
+        cmd="doctor"
+        shift
+        ;;
+      --uninstall)
+        cmd="uninstall"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  echo "$cmd"
+}
+
+main() {
+  local cmd
+  cmd="$(parse_args "$@")"
+
+  case "$cmd" in
+    install)
+      install_termux_deps
+      configure_code_server
+      create_helper_scripts
+      if [[ "$LAUNCH_AFTER_INSTALL" -eq 1 ]]; then
+        launch_now
+      else
+        ok "Install complete"
+        info "Start later with: bash ~/start-vscode"
+      fi
+      ;;
+    start)
+      if [[ ! -f "$CONFIG_FILE" ]]; then
+        die "Config not found. Run the installer first."
+      fi
+      exec code-server --config "$CONFIG_FILE" "$PWD"
+      ;;
+    stop)
+      stop_server
+      ;;
+    status)
+      status_server
+      ;;
+    doctor)
+      doctor
+      ;;
+    uninstall)
+      uninstall_generated_files
+      ;;
+    *)
+      die "Unknown command"
+      ;;
+  esac
+}
+
+trap 'rc=$?; echo; err "Failed at line ${LINENO} with exit code ${rc}"; tail_logs_if_any; exit "$rc"' ERR
+main "$@"
