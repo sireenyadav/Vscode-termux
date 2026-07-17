@@ -133,30 +133,49 @@ else
     print_success "Downloaded: $(ls -lh "$TAR_FILE" | awk '{print $5}')"
     print_step "Extracting (this may take a moment)..."
     
-    # Use --hard-dereference to handle hard links on Android filesystems
-    if tar -xzf "$TAR_FILE" -C "$INSTALL_DIR" --strip-components=1 --hard-dereference 2>/dev/null; then
-        print_success "Extracted successfully"
-    else
-        print_warn "Standard extraction had issues, trying alternative..."
-        # Alternative: extract to temp dir in HOME then copy
-        rm -rf "$INSTALL_DIR"
-        mkdir -p "$INSTALL_DIR"
-        EXTRACT_TEMP="$TEMP_DIR/codeserver-extract"
-        rm -rf "$EXTRACT_TEMP"
-        mkdir -p "$EXTRACT_TEMP"
-        tar -xzf "$TAR_FILE" --strip-components=1 -C "$EXTRACT_TEMP" 2>/dev/null || true
-        if [ -d "$EXTRACT_TEMP" ] && [ "$(ls -A "$EXTRACT_TEMP" 2>/dev/null)" ]; then
-            cp -r "$EXTRACT_TEMP"/* "$INSTALL_DIR/" 2>/dev/null || true
-            rm -rf "$EXTRACT_TEMP"
-            print_success "Extracted using alternative method"
+    # Clean up old install
+    rm -rf "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
+    
+    # Extract to temp first, then copy with -L (follow symlinks, copy files instead of links)
+    EXTRACT_TEMP="$TEMP_DIR/codeserver-extract-$$"
+    rm -rf "$EXTRACT_TEMP"
+    mkdir -p "$EXTRACT_TEMP"
+    
+    print_step "Extracting tarball..."
+    tar -xzf "$TAR_FILE" -C "$EXTRACT_TEMP" --strip-components=1 2>/dev/null || {
+        print_error "tar extraction failed"
+        rm -f "$TAR_FILE"
+        exit 1
+    }
+    
+    print_step "Copying files (resolving links)..."
+    # Use cp -rL to copy everything, dereferencing symlinks and hard links
+    cp -rL "$EXTRACT_TEMP"/* "$INSTALL_DIR/" 2>/dev/null || {
+        print_error "Copy failed"
+        rm -rf "$EXTRACT_TEMP" "$TAR_FILE"
+        exit 1
+    }
+    
+    rm -rf "$EXTRACT_TEMP"
+    rm -f "$TAR_FILE"
+    
+    # Verify node binary exists
+    if [ ! -f "$INSTALL_DIR/lib/node" ]; then
+        print_warn "Bundled node not found, checking for system node..."
+        if check_command node; then
+            print_info "Using system node: $(which node)"
+            # Create a wrapper script
+            cat > "$INSTALL_DIR/bin/code-server" << EOF
+#!/data/data/com.termux/files/usr/bin/bash
+exec $(which node) "$INSTALL_DIR/out/node/entry.js" "\$@"
+EOF
+            chmod +x "$INSTALL_DIR/bin/code-server"
         else
-            print_error "Extraction failed completely"
-            rm -f "$TAR_FILE"
+            print_error "No node runtime found. Please install nodejs-lts: pkg install nodejs-lts"
             exit 1
         fi
     fi
-    
-    rm -f "$TAR_FILE"
     
     # Create symlink
     ln -sf "$INSTALL_DIR/bin/code-server" "$BIN_DIR/code-server"
