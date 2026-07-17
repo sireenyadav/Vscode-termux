@@ -198,18 +198,30 @@ install_packages() {
 
   if ! dpkg -s code-server >/dev/null 2>&1; then
     info "Installing code-server from Termux repositories..."
-    if ! pkg install -y code-server curl procps iproute2 qrencode; then
-      err "code-server install failed."
-      echo
-      echo "Try:"
-      echo "  pkg search code-server"
-      echo "  termux-change-repo"
-      echo
-      die "Stopping here. I am not falling back to npm because that path broke on your device."
+
+    # Install required packages
+    if ! pkg install -y code-server curl procps iproute2; then
+        err "Failed to install required packages."
+        echo
+        echo "Try:"
+        echo "  termux-change-repo"
+        echo "  pkg update"
+        echo "  pkg search code-server"
+        echo
+        die "code-server installation failed."
     fi
-  else
+
+    # Optional: install qrencode if available
+    if pkg search qrencode 2>/dev/null | grep -q "^qrencode"; then
+        info "Installing optional package: qrencode"
+        pkg install -y qrencode || warn "Failed to install qrencode. QR code support will be disabled."
+    else
+        info "qrencode is not available in the current repositories. Skipping QR code support."
+    fi
+
+else
     ok "code-server already installed"
-  fi
+fi
 
   if ! have code-server; then
     die "code-server is installed but not on PATH."
