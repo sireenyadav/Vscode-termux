@@ -61,8 +61,8 @@ print_step "Updating package lists..."
 pkg update -y || { print_error "Failed to update packages"; exit 1; }
 
 DEPS_TO_INSTALL=""
-for dep in nodejs-lts git curl; do
-    if ! check_command "$dep"; then
+for dep in tur-repo code-server curl; do
+    if ! pkg list-installed 2>/dev/null | grep -q "^$dep/"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL $dep"
     fi
 done
@@ -74,58 +74,23 @@ else
     print_success "All dependencies already installed"
 fi
 
-NODE_VERSION=$(node --version 2>/dev/null | cut -d'v' -f2 | cut -d'.' -f1)
-if [ "$NODE_VERSION" -lt 18 ] 2>/dev/null; then
-    print_warn "Node.js version may be too old. Consider upgrading."
-fi
-
-# Step 3: Install/Update code-server
-print_header "Step 3/6: Setting Up code-server"
-
-NPM_PREFIX=$(npm prefix -g)
-NPM_BIN="$NPM_PREFIX/bin"
-
-if ! echo "$PATH" | grep -q "$NPM_BIN"; then
-    print_step "Adding npm global bin to PATH..."
-    echo "export PATH=\"$NPM_BIN:\$PATH\"" >> "$HOME/.bashrc"
-    export PATH="$NPM_BIN:$PATH"
-    print_success "PATH updated"
-fi
-
-CODE_SERVER_PATH=""
+# Step 3: Verify code-server
+print_header "Step 3/6: Verifying code-server"
 
 if check_command code-server; then
-    CODE_SERVER_PATH=$(which code-server)
     CURRENT_VERSION=$(code-server --version 2>/dev/null | head -1)
     print_success "code-server found: $CURRENT_VERSION"
-    print_info "Location: $CODE_SERVER_PATH"
+    print_info "Location: $(which code-server)"
 else
-    print_step "Searching for code-server installation..."
-    FOUND=$(find "$NPM_PREFIX" -name "code-server" -type f 2>/dev/null | head -1)
-    
+    print_error "code-server not found after installation"
+    print_step "Trying to locate..."
+    FOUND=$(find "$PREFIX" -name "code-server" -type f 2>/dev/null | head -1)
     if [ -n "$FOUND" ]; then
-        CODE_SERVER_PATH="$FOUND"
-        print_success "Found code-server at: $CODE_SERVER_PATH"
-        ln -sf "$CODE_SERVER_PATH" "$NPM_BIN/code-server" 2>/dev/null || true
-        export PATH="$NPM_BIN:$PATH"
+        print_success "Found at: $FOUND"
+        export PATH="$(dirname "$FOUND"):$PATH"
     else
-        print_step "Installing code-server via npm..."
-        npm install -g code-server || {
-            print_error "npm install failed. Trying with --force..."
-            npm install -g code-server --force || {
-                print_error "Installation failed. Trying yarn..."
-                pkg install -y yarn
-                yarn global add code-server
-            }
-        }
-        
-        if check_command code-server; then
-            CODE_SERVER_PATH=$(which code-server)
-        else
-            CODE_SERVER_PATH=$(find "$NPM_PREFIX" -name "code-server" -type f 2>/dev/null | head -1)
-            [ -z "$CODE_SERVER_PATH" ] && { print_error "Could not install code-server"; exit 1; }
-        fi
-        print_success "code-server installed successfully"
+        print_error "Could not find code-server. Please check tur-repo installation."
+        exit 1
     fi
 fi
 
@@ -165,8 +130,6 @@ START_SCRIPT="$HOME/start-vscode"
 cat > "$START_SCRIPT" << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 CONFIG_FILE="$HOME/.config/code-server/config.yaml"
-NPM_PREFIX=$(npm prefix -g)
-export PATH="$NPM_PREFIX/bin:$PATH"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "❌ Config not found. Run the setup script first."
