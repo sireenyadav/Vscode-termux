@@ -66,7 +66,7 @@ print_step "Updating package lists..."
 pkg update -y || { print_error "Failed to update packages"; exit 1; }
 
 DEPS_TO_INSTALL=""
-for dep in wget curl; do
+for dep in curl; do
     if ! check_command "$dep"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL $dep"
     fi
@@ -113,22 +113,41 @@ else
     # Create directories
     mkdir -p "$INSTALL_DIR" "$BIN_DIR"
     
-    # Download and extract
+    # Download using curl (follows redirects)
     cd "$HOME"
-    wget -q --show-progress "$DOWNLOAD_URL" -O "${ARCHIVE_NAME}.tar.gz" || {
+    TAR_FILE="${ARCHIVE_NAME}.tar.gz"
+    
+    if ! curl -fsSL -o "$TAR_FILE" "$DOWNLOAD_URL"; then
         print_error "Download failed. Trying fallback version..."
         CODE_SERVER_VERSION="4.96.4"
         ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-arm64"
         DOWNLOAD_URL="https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${ARCHIVE_NAME}.tar.gz"
-        wget -q --show-progress "$DOWNLOAD_URL" -O "${ARCHIVE_NAME}.tar.gz" || {
+        
+        if ! curl -fsSL -o "$TAR_FILE" "$DOWNLOAD_URL"; then
             print_error "Fallback download also failed"
             exit 1
-        }
-    }
+        fi
+    fi
     
-    print_step "Extracting..."
-    tar -xzf "${ARCHIVE_NAME}.tar.gz" -C "$INSTALL_DIR" --strip-components=1
-    rm -f "${ARCHIVE_NAME}.tar.gz"
+    print_success "Downloaded: $(ls -lh "$TAR_FILE" | awk '{print $5}')"
+    print_step "Extracting (this may take a moment)..."
+    
+    # Use --hard-dereference to handle hard links on Android filesystems
+    if tar -xzf "$TAR_FILE" -C "$INSTALL_DIR" --strip-components=1 --hard-dereference 2>/dev/null; then
+        print_success "Extracted successfully"
+    else
+        print_warn "Standard extraction had issues, trying alternative..."
+        # Alternative: extract to temp then copy
+        rm -rf "$INSTALL_DIR"
+        mkdir -p "$INSTALL_DIR"
+        TEMP_DIR="/tmp/codeserver-$$"
+        mkdir -p "$TEMP_DIR"
+        tar -xzf "$TAR_FILE" --strip-components=1 -C "$TEMP_DIR" 2>/dev/null || true
+        cp -r "$TEMP_DIR"/* "$INSTALL_DIR/" 2>/dev/null || true
+        rm -rf "$TEMP_DIR"
+    fi
+    
+    rm -f "$TAR_FILE"
     
     # Create symlink
     ln -sf "$INSTALL_DIR/bin/code-server" "$BIN_DIR/code-server"
@@ -143,7 +162,9 @@ else
         print_success "code-server installed successfully!"
         code-server --version | head -1
     else
-        print_error "Installation failed"
+        print_error "Installation failed - binary not found"
+        print_info "Checking $INSTALL_DIR/bin/"
+        ls -la "$INSTALL_DIR/bin/" 2>/dev/null || print_error "Directory not found"
         exit 1
     fi
 fi
