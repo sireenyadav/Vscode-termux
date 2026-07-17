@@ -20,6 +20,11 @@ BIND_ADDR="127.0.0.1"
 PASSWORD="12345678"
 CONFIG_DIR="$HOME/.config/code-server"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
+INSTALL_DIR="$HOME/.local/lib/code-server"
+BIN_DIR="$HOME/.local/bin"
+
+# code-server version to install
+CODE_SERVER_VERSION="4.98.2"
 
 # Helper Functions
 print_header() {
@@ -54,15 +59,15 @@ print_info "Architecture: $ARCH"
 STORAGE=$(df -h $HOME | tail -1 | awk '{print $4}')
 print_info "Available storage: $STORAGE"
 
-# Step 2: Update & Install Dependencies
+# Step 2: Install Dependencies
 print_header "Step 2/6: Installing Dependencies"
 
 print_step "Updating package lists..."
 pkg update -y || { print_error "Failed to update packages"; exit 1; }
 
 DEPS_TO_INSTALL=""
-for dep in tur-repo code-server curl; do
-    if ! pkg list-installed 2>/dev/null | grep -q "^$dep/"; then
+for dep in wget curl; do
+    if ! check_command "$dep"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL $dep"
     fi
 done
@@ -74,22 +79,71 @@ else
     print_success "All dependencies already installed"
 fi
 
-# Step 3: Verify code-server
-print_header "Step 3/6: Verifying code-server"
+# Step 3: Download & Install code-server (Standalone Binary)
+print_header "Step 3/6: Installing code-server (Standalone)"
 
 if check_command code-server; then
     CURRENT_VERSION=$(code-server --version 2>/dev/null | head -1)
-    print_success "code-server found: $CURRENT_VERSION"
+    print_success "code-server already installed: $CURRENT_VERSION"
     print_info "Location: $(which code-server)"
 else
-    print_error "code-server not found after installation"
-    print_step "Trying to locate..."
-    FOUND=$(find "$PREFIX" -name "code-server" -type f 2>/dev/null | head -1)
-    if [ -n "$FOUND" ]; then
-        print_success "Found at: $FOUND"
-        export PATH="$(dirname "$FOUND"):$PATH"
+    print_step "Downloading code-server v${CODE_SERVER_VERSION} for ${ARCH}..."
+    
+    # Determine download URL based on architecture
+    case "$ARCH" in
+        aarch64|arm64)
+            ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-arm64"
+            ;;
+        armv7l|armhf)
+            ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-armv7l"
+            ;;
+        x86_64|amd64)
+            ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-amd64"
+            ;;
+        *)
+            print_error "Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+    
+    DOWNLOAD_URL="https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${ARCHIVE_NAME}.tar.gz"
+    
+    print_info "Download URL: $DOWNLOAD_URL"
+    
+    # Create directories
+    mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+    
+    # Download and extract
+    cd "$HOME"
+    wget -q --show-progress "$DOWNLOAD_URL" -O "${ARCHIVE_NAME}.tar.gz" || {
+        print_error "Download failed. Trying fallback version..."
+        CODE_SERVER_VERSION="4.96.4"
+        ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-arm64"
+        DOWNLOAD_URL="https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${ARCHIVE_NAME}.tar.gz"
+        wget -q --show-progress "$DOWNLOAD_URL" -O "${ARCHIVE_NAME}.tar.gz" || {
+            print_error "Fallback download also failed"
+            exit 1
+        }
+    }
+    
+    print_step "Extracting..."
+    tar -xzf "${ARCHIVE_NAME}.tar.gz" -C "$INSTALL_DIR" --strip-components=1
+    rm -f "${ARCHIVE_NAME}.tar.gz"
+    
+    # Create symlink
+    ln -sf "$INSTALL_DIR/bin/code-server" "$BIN_DIR/code-server"
+    
+    # Add to PATH
+    if ! echo "$PATH" | grep -q "$BIN_DIR"; then
+        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$HOME/.bashrc"
+        export PATH="$BIN_DIR:$PATH"
+    fi
+    
+    if check_command code-server; then
+        print_success "code-server installed successfully!"
+        code-server --version | head -1
     else
-        print_error "Could not find code-server. Please check tur-repo installation."
+        print_error "Installation failed"
         exit 1
     fi
 fi
@@ -130,6 +184,8 @@ START_SCRIPT="$HOME/start-vscode"
 cat > "$START_SCRIPT" << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 CONFIG_FILE="$HOME/.config/code-server/config.yaml"
+BIN_DIR="$HOME/.local/bin"
+export PATH="$BIN_DIR:$PATH"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "❌ Config not found. Run the setup script first."
