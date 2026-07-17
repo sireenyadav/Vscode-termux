@@ -67,7 +67,7 @@ print_step "Updating package lists..."
 pkg update -y || { print_error "Failed to update packages"; exit 1; }
 
 DEPS_TO_INSTALL=""
-for dep in curl; do
+for dep in curl nodejs-lts; do
     if ! check_command "$dep"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL $dep"
     fi
@@ -137,7 +137,7 @@ else
     rm -rf "$INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
     
-    # Extract to temp first, then copy with -L (follow symlinks, copy files instead of links)
+    # Extract to temp first
     EXTRACT_TEMP="$TEMP_DIR/codeserver-extract-$$"
     rm -rf "$EXTRACT_TEMP"
     mkdir -p "$EXTRACT_TEMP"
@@ -149,35 +149,43 @@ else
         exit 1
     }
     
-    print_step "Copying files (resolving links)..."
-    # Use cp -rL to copy everything, dereferencing symlinks and hard links
-    cp -rL "$EXTRACT_TEMP"/* "$INSTALL_DIR/" 2>/dev/null || {
-        print_error "Copy failed"
-        rm -rf "$EXTRACT_TEMP" "$TAR_FILE"
-        exit 1
-    }
+    print_step "Copying files..."
+    # Copy everything, dereferencing symlinks
+    cp -rL "$EXTRACT_TEMP"/* "$INSTALL_DIR/" 2>/dev/null || true
     
     rm -rf "$EXTRACT_TEMP"
     rm -f "$TAR_FILE"
     
-    # Verify node binary exists
-    if [ ! -f "$INSTALL_DIR/lib/node" ]; then
-        print_warn "Bundled node not found, checking for system node..."
-        if check_command node; then
-            print_info "Using system node: $(which node)"
-            # Create a wrapper script
-            cat > "$INSTALL_DIR/bin/code-server" << EOF
-#!/data/data/com.termux/files/usr/bin/bash
-exec $(which node) "$INSTALL_DIR/out/node/entry.js" "\$@"
-EOF
-            chmod +x "$INSTALL_DIR/bin/code-server"
-        else
-            print_error "No node runtime found. Please install nodejs-lts: pkg install nodejs-lts"
-            exit 1
-        fi
+    # FIX: The bundled node binary is missing/broken due to hardlink issues.
+    # Solution: Patch the launcher to use system node instead.
+    print_step "Patching launcher to use system node..."
+    
+    NODE_PATH=$(which node)
+    ENTRY_JS="$INSTALL_DIR/out/node/entry.js"
+    
+    if [ ! -f "$ENTRY_JS" ]; then
+        print_error "Could not find code-server entry point: $ENTRY_JS"
+        print_info "Contents of $INSTALL_DIR:"
+        ls -la "$INSTALL_DIR/" 2>/dev/null || true
+        exit 1
     fi
     
-    # Create symlink
+    # Create a wrapper script that uses system node
+    cat > "$INSTALL_DIR/bin/code-server" << EOF
+#!/data/data/com.termux/files/usr/bin/bash
+# VS Code: Server launcher for Termux
+# Uses system node instead of bundled node (which has hardlink issues on Android)
+
+export NODE_PATH="$INSTALL_DIR/node_modules"
+exec "$NODE_PATH" "$ENTRY_JS" "\$@"
+EOF
+    chmod +x "$INSTALL_DIR/bin/code-server"
+    
+    # Also create the lib/node symlink/pointer for compatibility
+    mkdir -p "$INSTALL_DIR/lib"
+    ln -sf "$NODE_PATH" "$INSTALL_DIR/lib/node" 2>/dev/null || true
+    
+    # Create symlink in bin dir
     ln -sf "$INSTALL_DIR/bin/code-server" "$BIN_DIR/code-server"
     
     # Add to PATH
