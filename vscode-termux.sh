@@ -20,12 +20,6 @@ BIND_ADDR="127.0.0.1"
 PASSWORD="12345678"
 CONFIG_DIR="$HOME/.config/code-server"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
-INSTALL_DIR="$HOME/.local/lib/code-server"
-BIN_DIR="$HOME/.local/bin"
-TEMP_DIR="$HOME/.tmp"
-
-# code-server version to install
-CODE_SERVER_VERSION="4.98.2"
 
 # Helper Functions
 print_header() {
@@ -41,12 +35,8 @@ print_info()    { echo -e "${BLUE}ℹ️  $1${NC}"; }
 print_warn()    { echo -e "${YELLOW}⚠️  $1${NC}"; }
 print_step()    { echo -e "${CYAN}→ $1${NC}"; }
 
-check_command() {
-    command -v "$1" &> /dev/null
-}
-
 # Step 1: System Check
-print_header "Step 1/6: System Environment Check"
+print_header "Step 1/5: System Environment Check"
 
 if [ -z "$TERMUX_VERSION" ] && [ ! -d "/data/data/com.termux" ]; then
     print_warn "Not running in Termux. Some features may not work."
@@ -61,152 +51,58 @@ STORAGE=$(df -h $HOME | tail -1 | awk '{print $4}')
 print_info "Available storage: $STORAGE"
 
 # Step 2: Install Dependencies
-print_header "Step 2/6: Installing Dependencies"
+print_header "Step 2/5: Installing Dependencies"
 
 print_step "Updating package lists..."
 pkg update -y || { print_error "Failed to update packages"; exit 1; }
 
-DEPS_TO_INSTALL=""
-for dep in curl nodejs-lts; do
-    if ! check_command "$dep"; then
-        DEPS_TO_INSTALL="$DEPS_TO_INSTALL $dep"
-    fi
-done
+print_step "Installing nodejs-lts and curl..."
+pkg install -y nodejs-lts curl || { print_error "Failed to install dependencies"; exit 1; }
 
-if [ -n "$DEPS_TO_INSTALL" ]; then
-    print_step "Installing: $DEPS_TO_INSTALL"
-    pkg install -y $DEPS_TO_INSTALL || { print_error "Failed to install dependencies"; exit 1; }
-else
-    print_success "All dependencies already installed"
-fi
+print_success "Dependencies installed"
 
-# Step 3: Download & Install code-server (Standalone Binary)
-print_header "Step 3/6: Installing code-server (Standalone)"
+# Step 3: Install code-server via npm
+print_header "Step 3/5: Installing code-server via npm"
 
-if check_command code-server; then
+# Check if code-server is installed AND actually works
+if command -v code-server >/dev/null 2>&1 && code-server --version >/dev/null 2>&1; then
     CURRENT_VERSION=$(code-server --version 2>/dev/null | head -1)
-    print_success "code-server already installed: $CURRENT_VERSION"
-    print_info "Location: $(which code-server)"
+    print_success "code-server already installed and working: $CURRENT_VERSION"
+    print_info "Location: $(command -v code-server)"
 else
-    print_step "Downloading code-server v${CODE_SERVER_VERSION} for ${ARCH}..."
+    print_step "Installing code-server via npm..."
     
-    # Determine download URL based on architecture
-    case "$ARCH" in
-        aarch64|arm64)
-            ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-arm64"
-            ;;
-        armv7l|armhf)
-            ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-armv7l"
-            ;;
-        x86_64|amd64)
-            ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-amd64"
-            ;;
-        *)
-            print_error "Unsupported architecture: $ARCH"
-            exit 1
-            ;;
-    esac
+    # Ensure npm global bin is in PATH
+    NPM_PREFIX=$(npm prefix -g)
+    NPM_BIN="$NPM_PREFIX/bin"
     
-    DOWNLOAD_URL="https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${ARCHIVE_NAME}.tar.gz"
-    
-    print_info "Download URL: $DOWNLOAD_URL"
-    
-    # Create directories
-    mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$TEMP_DIR"
-    
-    # Download using curl (follows redirects)
-    cd "$HOME"
-    TAR_FILE="${ARCHIVE_NAME}.tar.gz"
-    
-    if ! curl -fsSL -o "$TAR_FILE" "$DOWNLOAD_URL"; then
-        print_error "Download failed. Trying fallback version..."
-        CODE_SERVER_VERSION="4.96.4"
-        ARCHIVE_NAME="code-server-${CODE_SERVER_VERSION}-linux-arm64"
-        DOWNLOAD_URL="https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${ARCHIVE_NAME}.tar.gz"
-        
-        if ! curl -fsSL -o "$TAR_FILE" "$DOWNLOAD_URL"; then
-            print_error "Fallback download also failed"
-            exit 1
-        fi
+    if ! echo "$PATH" | grep -q "$NPM_BIN"; then
+        echo "export PATH=\"$NPM_BIN:\$PATH\"" >> "$HOME/.bashrc"
+        export PATH="$NPM_BIN:$PATH"
+        print_info "Added npm global bin to PATH"
     fi
     
-    print_success "Downloaded: $(ls -lh "$TAR_FILE" | awk '{print $5}')"
-    print_step "Extracting (this may take a moment)..."
-    
-    # Clean up old install
-    rm -rf "$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
-    
-    # Extract to temp first
-    EXTRACT_TEMP="$TEMP_DIR/codeserver-extract-$$"
-    rm -rf "$EXTRACT_TEMP"
-    mkdir -p "$EXTRACT_TEMP"
-    
-    print_step "Extracting tarball..."
-    tar -xzf "$TAR_FILE" -C "$EXTRACT_TEMP" --strip-components=1 2>/dev/null || {
-        print_error "tar extraction failed"
-        rm -f "$TAR_FILE"
-        exit 1
+    # Install code-server globally
+    npm install -g code-server || {
+        print_error "npm install failed. Trying with --force..."
+        npm install -g code-server --force || {
+            print_error "Installation failed completely"
+            exit 1
+        }
     }
     
-    print_step "Copying files..."
-    # Copy everything, dereferencing symlinks
-    cp -rL "$EXTRACT_TEMP"/* "$INSTALL_DIR/" 2>/dev/null || true
-    
-    rm -rf "$EXTRACT_TEMP"
-    rm -f "$TAR_FILE"
-    
-    # FIX: The bundled node binary is missing/broken due to hardlink issues.
-    # Solution: Patch the launcher to use system node instead.
-    print_step "Patching launcher to use system node..."
-    
-    NODE_PATH=$(which node)
-    ENTRY_JS="$INSTALL_DIR/out/node/entry.js"
-    
-    if [ ! -f "$ENTRY_JS" ]; then
-        print_error "Could not find code-server entry point: $ENTRY_JS"
-        print_info "Contents of $INSTALL_DIR:"
-        ls -la "$INSTALL_DIR/" 2>/dev/null || true
-        exit 1
-    fi
-    
-    # Create a wrapper script that uses system node
-    cat > "$INSTALL_DIR/bin/code-server" << EOF
-#!/data/data/com.termux/files/usr/bin/bash
-# VS Code: Server launcher for Termux
-# Uses system node instead of bundled node (which has hardlink issues on Android)
-
-export NODE_PATH="$INSTALL_DIR/node_modules"
-exec "$NODE_PATH" "$ENTRY_JS" "\$@"
-EOF
-    chmod +x "$INSTALL_DIR/bin/code-server"
-    
-    # Also create the lib/node symlink/pointer for compatibility
-    mkdir -p "$INSTALL_DIR/lib"
-    ln -sf "$NODE_PATH" "$INSTALL_DIR/lib/node" 2>/dev/null || true
-    
-    # Create symlink in bin dir
-    ln -sf "$INSTALL_DIR/bin/code-server" "$BIN_DIR/code-server"
-    
-    # Add to PATH
-    if ! echo "$PATH" | grep -q "$BIN_DIR"; then
-        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$HOME/.bashrc"
-        export PATH="$BIN_DIR:$PATH"
-    fi
-    
-    if check_command code-server; then
+    # Verify installation
+    if command -v code-server >/dev/null 2>&1 && code-server --version >/dev/null 2>&1; then
         print_success "code-server installed successfully!"
         code-server --version | head -1
     else
-        print_error "Installation failed - binary not found"
-        print_info "Checking $INSTALL_DIR/bin/"
-        ls -la "$INSTALL_DIR/bin/" 2>/dev/null || print_error "Directory not found"
+        print_error "Installation verification failed"
         exit 1
     fi
 fi
 
 # Step 4: Configure code-server
-print_header "Step 4/6: Configuring code-server"
+print_header "Step 4/5: Configuring code-server"
 
 mkdir -p "$CONFIG_DIR"
 
@@ -234,15 +130,13 @@ print_success "Config written to $CONFIG_FILE"
 print_info "Port: $PORT"
 print_info "Password: $PASSWORD"
 
-# Step 5: Create Shortcuts
-print_header "Step 5/6: Creating Shortcuts"
+# Step 5: Create Shortcuts & Launch
+print_header "Step 5/5: Creating Shortcuts & Launching"
 
 START_SCRIPT="$HOME/start-vscode"
 cat > "$START_SCRIPT" << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 CONFIG_FILE="$HOME/.config/code-server/config.yaml"
-BIN_DIR="$HOME/.local/bin"
-export PATH="$BIN_DIR:$PATH"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "❌ Config not found. Run the setup script first."
@@ -277,9 +171,7 @@ EOF
 chmod +x "$STOP_SCRIPT"
 print_success "Created: $STOP_SCRIPT"
 
-# Step 6: Launch
-print_header "Step 6/6: Launching VS Code: Server"
-
+# Launch
 if pgrep -f "code-server" > /dev/null; then
     print_warn "code-server is already running!"
     print_info "Visit: http://${BIND_ADDR}:${PORT}"
