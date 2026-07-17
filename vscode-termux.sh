@@ -1,6 +1,4 @@
-
-# Clean bash script - NO Python mixed in
-script_content = r'''#!/data/data/com.termux/files/usr/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
 # VS Code: Server One-Command Setup for Termux (Tablet Edition)
 # Usage: bash <(curl -sL https://raw.githubusercontent.com/sireenyadav/Vscode-termux/main/vscode-termux.sh)
@@ -235,18 +233,3 @@ echo -e "${GREEN}═════════════════════
 echo ""
 
 code-server --config "$CONFIG_FILE"
-'''
-
-# Save clean version
-with open('/mnt/agents/output/vscode-termux.sh', 'w') as f:
-    f.write(script_content)
-
-# Verify it's clean bash only
-lines = script_content.splitlines()
-has_python = any('print(' in l and 'echo' not in l for l in lines)
-print(f"Lines: {len(lines)}")
-print(f"Contains Python code: {has_python}")
-print(f"Last 5 lines:")
-for l in lines[-5:]:
-    print(f"  {l}")
-print("\n✅ Clean bash script saved!")
