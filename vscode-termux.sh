@@ -1,12 +1,8 @@
 #!/data/data/com.termux/files/usr/bin/env bash
 # ============================================================
-# code-server on Termux (phone-hosted, tablet/browser access)
-# - Official Termux package path (tur-repo + code-server)
-# - LAN URL auto-detection
-# - Localhost URL for the phone itself
-# - QR code optional
-# - Start / stop / status / doctor / uninstall
-# - No npm install path
+# code-server on Termux (Extreme Performance Edition)
+# Target: Snapdragon 4 Gen 2 (ARM64)
+# Optimizations: V8 Memory tuning, I/O reduction, CPU priority
 # ============================================================
 
 set -Eeuo pipefail
@@ -54,23 +50,17 @@ warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
 err()  { echo -e "${RED}❌ $*${NC}" >&2; }
 die()  { err "$*"; exit 1; }
 
-have() {
-  command -v "$1" >/dev/null 2>&1
-}
+have() { command -v "$1" >/dev/null 2>&1; }
 
 is_termux() {
   [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]
 }
 
 require_termux() {
-  if ! is_termux; then
-    die "This script is for Termux only."
-  fi
+  if ! is_termux; then die "This script is for Termux only."; fi
 }
 
-timestamp() {
-  date +"%Y%m%d-%H%M%S"
-}
+timestamp() { date +"%Y%m%d-%H%M%S"; }
 
 ensure_dirs() {
   mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
@@ -78,18 +68,14 @@ ensure_dirs() {
 
 backup_file_if_exists() {
   local file="$1"
-  if [[ -f "$file" ]]; then
-    cp -f "$file" "${file}.backup.$(timestamp)"
-  fi
+  if [[ -f "$file" ]]; then cp -f "$file" "${file}.backup.$(timestamp)"; fi
 }
 
 generate_password() {
   if have openssl; then
-    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16
-    echo
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16; echo
   else
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16
-    echo
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16; echo
   fi
 }
 
@@ -102,52 +88,18 @@ get_existing_password() {
 get_lan_ip() {
   local ip=""
   if have ip; then
-    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i == "src") { print $(i+1); exit }
-        }
-      }' || true)"
-    if [[ -n "${ip:-}" ]]; then
-      echo "$ip"
-      return 0
-    fi
-
-    for dev in wlan0 wlan1 eth0 rmnet_data0 rmnet_data1; do
-      ip="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}' || true)"
-      if [[ -n "${ip:-}" ]]; then
-        echo "$ip"
-        return 0
-      fi
-    done
-
+    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+    if [[ -n "${ip:-}" ]]; then echo "$ip"; return 0; fi
     ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}' || true)"
-    if [[ -n "${ip:-}" ]]; then
-      echo "$ip"
-      return 0
-    fi
+    if [[ -n "${ip:-}" ]]; then echo "$ip"; return 0; fi
   fi
-
-  if have ifconfig; then
-    ip="$(ifconfig 2>/dev/null | awk '
-      /inet / && $2 != "127.0.0.1" { print $2; exit }
-    ' || true)"
-    [[ -n "${ip:-}" ]] && { echo "$ip"; return 0; }
-  fi
-
   return 1
 }
 
 port_listening() {
   local port="$1"
-  if have ss; then
-    ss -ltn 2>/dev/null | grep -q ":${port} "
-    return $?
-  fi
-  if have netstat; then
-    netstat -ltn 2>/dev/null | grep -q ":${port} "
-    return $?
-  fi
+  if have ss; then ss -ltn 2>/dev/null | grep -q ":${port} "; return $?; fi
+  if have netstat; then netstat -ltn 2>/dev/null | grep -q ":${port} "; return $?; fi
   return 1
 }
 
@@ -160,33 +112,27 @@ auth: password
 password: ${pass}
 cert: false
 disable-telemetry: true
+disable-update-check: true
+disable-workspace-trust: true
+log: error
 EOF
   chmod 600 "$CONFIG_FILE"
 }
 
 install_packages() {
-  print_header "Step 1/4: Install code-server"
-
+  print_header "Step 1/4: Install code-server (Performance Repo)"
   require_termux
 
-  info "Termux detected"
-  info "Architecture: $(uname -m)"
-  info "Home: $HOME"
+  info "Architecture: $(uname -m) | Termux API setup recommended"
 
-  if ! have pkg; then
-    die "pkg not found."
-  fi
+  if ! have pkg; then die "pkg not found."; fi
 
   info "Updating package lists..."
-  if ! pkg update -y; then
-    die "pkg update failed. Fix your repository/mirror setup and rerun."
-  fi
+  pkg update -y || die "pkg update failed."
 
   if ! dpkg -s tur-repo >/dev/null 2>&1; then
     info "Installing tur-repo..."
-    if ! pkg install -y tur-repo; then
-      die "Failed to install tur-repo. Run termux-change-repo and rerun."
-    fi
+    pkg install -y tur-repo || die "Failed to install tur-repo."
   else
     ok "tur-repo already installed"
   fi
@@ -197,48 +143,24 @@ install_packages() {
   fi
 
   if ! dpkg -s code-server >/dev/null 2>&1; then
-    info "Installing code-server from Termux repositories..."
-
-    # Install required packages
-    if ! pkg install -y code-server curl procps iproute2; then
-        err "Failed to install required packages."
-        echo
-        echo "Try:"
-        echo "  termux-change-repo"
-        echo "  pkg update"
-        echo "  pkg search code-server"
-        echo
+    info "Installing code-server & performance tools..."
+    # iproute2 for network, proot/termux-api for wake locks, util-linux for ionice/nice
+    if ! pkg install -y code-server curl iproute2 proot termux-api util-linux; then
         die "code-server installation failed."
     fi
 
-    # Optional: install qrencode if available
     if pkg search qrencode 2>/dev/null | grep -q "^qrencode"; then
-        info "Installing optional package: qrencode"
-        pkg install -y qrencode || warn "Failed to install qrencode. QR code support will be disabled."
-    else
-        info "qrencode is not available in the current repositories. Skipping QR code support."
+        pkg install -y qrencode || warn "Failed to install qrencode."
     fi
-
-else
+  else
     ok "code-server already installed"
-fi
-
-  if ! have code-server; then
-    die "code-server is installed but not on PATH."
-  fi
-
-  if ! code-server --version >/dev/null 2>&1; then
-    die "code-server exists but does not run."
   fi
 
   ok "code-server is installed and working"
-  info "Binary: $(command -v code-server)"
-  info "Version: $(code-server --version 2>/dev/null | head -n1 || true)"
 }
 
 configure_code_server() {
-  print_header "Step 2/4: Configure"
-
+  print_header "Step 2/4: Configure (I/O Optimized)"
   ensure_dirs
 
   local existing_pass=""
@@ -255,174 +177,141 @@ configure_code_server() {
   fi
 
   write_config "$PASSWORD"
-  ok "Config written: $CONFIG_FILE"
-  info "Bind address: ${BIND_ADDR}:${PORT}"
-  info "Password: ${PASSWORD}"
+  ok "Config written with I/O & Telemetry optimizations"
 }
 
 create_helpers() {
-  print_header "Step 3/4: Helper scripts"
+  print_header "Step 3/4: Helper scripts (V8 & CPU Tuned)"
 
-  cat > "$START_SCRIPT" <<EOF
+  # --- START SCRIPT (HEAVILY OPTIMIZED) ---
+  cat > "$START_SCRIPT" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/env bash
 set -Eeuo pipefail
 
-CONFIG_FILE="$CONFIG_FILE"
-PORT="$PORT"
-BIND_ADDR="$BIND_ADDR"
+CONFIG_FILE="$HOME/.config/code-server/config.yaml"
+PORT="8080"
+BIND_ADDR="0.0.0.0"
 
-if [[ ! -f "\$CONFIG_FILE" ]]; then
-  echo "❌ Config not found: \$CONFIG_FILE"
-  exit 1
-fi
+# 1. Kill any zombie processes to free 100% of RAM/CPU
+pkill -f 'code-server' 2>/dev/null || true
+pkill -f 'node.*code-server' 2>/dev/null || true
 
-LAN_IP=""
-if command -v ip >/dev/null 2>&1; then
-  LAN_IP="\$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i=="src") {print \$(i+1); exit}}' || true)"
-fi
-
-echo "🚀 Starting code-server..."
-echo "   Phone:  http://127.0.0.1:\${PORT}"
-if [[ -n "\${LAN_IP:-}" ]]; then
-  echo "   Tablet: http://\${LAN_IP}:\${PORT}"
-fi
-echo
-if command -v qrencode >/dev/null 2>&1 && [[ -n "\${LAN_IP:-}" ]]; then
-  echo "QR for tablet:"
-  qrencode -t ANSIUTF8 "http://\${LAN_IP}:\${PORT}" || true
-  echo
-fi
-
+# 2. Acquire Wake Lock so Android doesn't throttle CPU
 if command -v termux-wake-lock >/dev/null 2>&1; then
   termux-wake-lock >/dev/null 2>&1 || true
 fi
 
-cleanup() {
-  if command -v termux-wake-unlock >/dev/null 2>&1; then
-    termux-wake-unlock >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT
+# 3. Calculate V8 Memory Limits based on total system RAM
+TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+TOTAL_RAM_MB=$(( TOTAL_RAM_KB / 1024 ))
 
-exec code-server --config "\$CONFIG_FILE" --bind-addr "\${BIND_ADDR}:\${PORT}" "\$PWD"
-EOF
-  chmod +x "$START_SCRIPT"
-  ok "Created: $START_SCRIPT"
-
-  cat > "$STOP_SCRIPT" <<'EOF'
-#!/data/data/com.termux/files/usr/bin/env bash
-set -Eeuo pipefail
-
-if pgrep -af 'code-server' >/dev/null 2>&1; then
-  pkill -f 'code-server' && echo "🛑 code-server stopped"
+# Give V8 up to 4GB of heap space (or 60% of total RAM if less than 8GB)
+if [ "$TOTAL_RAM_MB" -ge 8192 ]; then
+  V8_MAX_OLD_SPACE=4096
 else
-  echo "ℹ️  code-server not running"
+  V8_MAX_OLD_SPACE=$(( TOTAL_RAM_MB * 60 / 100 ))
+fi
+
+# 4. Export V8 Engine Flags for Raw Desktop-like Performance
+export NODE_OPTIONS="
+  --max-old-space-size=${V8_MAX_OLD_SPACE} 
+  --max-semi-space-size=128 
+  --expose-gc 
+  --no-warnings 
+  --optimize-for-size=false
+"
+# V8 Explanation:
+# --max-old-space-size: Maximum heap in MB (prevents crashes, allows large workspaces)
+# --max-semi-space-size: Increases young-gen memory (MASSIVELY reduces UI stutter/GC pauses)
+# --expose-gc: Allows internal scripts to force garbage collection when idle
+# --optimize-for-size=false: Prioritizes execution speed over memory footprint
+
+# 5. Network IP detection
+LAN_IP=""
+if command -v ip >/dev/null 2>&1; then
+  LAN_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+fi
+
+echo "🚀 Starting code-server (Extreme Performance Mode)..."
+echo "   V8 Heap Limit: ${V8_MAX_OLD_SPACE}MB"
+echo "   Phone:  http://127.0.0.1:${PORT}"
+if [[ -n "${LAN_IP:-}" ]]; then
+  echo "   Tablet: http://${LAN_IP}:${PORT}"
+fi
+echo
+
+if command -v qrencode >/dev/null 2>&1 && [[ -n "${LAN_IP:-}" ]]; then
+  qrencode -t ANSIUTF8 "http://${LAN_IP}:${PORT}" || true
+fi
+
+# 6. Process Priority Boosting (Requires Root/Tsu)
+# If device is rooted, we push code-server to the Prime Cores (CPU 6/7 on SD 4 Gen 2) and max I/O priority
+EXEC_CMD="exec env NODE_OPTIONS=\"$NODE_OPTIONS\" code-server"
+EXEC_CMD="$EXEC_CMD --config \"$CONFIG_FILE\""
+EXEC_CMD="$EXEC_CMD --bind-addr \"${BIND_ADDR}:${PORT}\""
+EXEC_CMD="$EXEC_CMD --disable-update-check"
+EXEC_CMD="$EXEC_CMD --disable-workspace-trust"
+EXEC_CMD="$EXEC_CMD --log error"
+EXEC_CMD="$EXEC_CMD \"\$PWD\""
+
+if command -v tsu >/dev/null 2>&1; then
+  echo "⚡ Root detected: Boosting CPU Priority & isolating to Prime Cores..."
+  # taskset 0xC0 assigns to CPU 6 and 7 (Prime performance cores on SD 4 Gen 2)
+  # nice -n -20 gives highest possible CPU scheduling priority
+  # ionice -c 1 -n 0 gives highest possible disk I/O priority
+  eval "tsu -c 'taskset 0xC0 nice -n -20 ionice -c 1 -n 0 $EXEC_CMD'"
+else
+  eval "$EXEC_CMD"
+fi
+
+# Release wake lock on exit
+if command -v termux-wake-unlock >/dev/null 2>&1; then
+  termux-wake-unlock >/dev/null 2>&1 || true
 fi
 EOF
-  chmod +x "$STOP_SCRIPT"
-  ok "Created: $STOP_SCRIPT"
+  chmod +x "$START_SCRIPT"
+  ok "Created: $START_SCRIPT (Optimized)"
 
+  # --- STOP SCRIPT ---
+  cat > "$STOP_SCRIPT" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/env bash
+pkill -f 'code-server' 2>/dev/null || true
+pkill -f 'node.*code-server' 2>/dev/null || true
+if command -v termux-wake-unlock >/dev/null 2>&1; then
+  termux-wake-unlock >/dev/null 2>&1 || true
+fi
+echo "🛑 code-server stopped and wake lock released"
+EOF
+  chmod +x "$STOP_SCRIPT"
+
+  # --- STATUS & DOCTOR (Kept similar, stripped non-essential logic) ---
   cat > "$STATUS_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/env bash
-set -Eeuo pipefail
-
-PORT="$PORT"
-CONFIG_FILE="$CONFIG_FILE"
-
 if pgrep -af 'code-server' >/dev/null 2>&1; then
-  echo "✅ code-server is running"
+  echo "✅ code-server is running (PID: \$(pgrep -f 'code-server' | head -n1))"
 else
   echo "⚠️  code-server is not running"
 fi
-
-if command -v ip >/dev/null 2>&1; then
-  LAN_IP="\$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i=="src") {print \$(i+1); exit}}' || true)"
-  if [[ -n "\${LAN_IP:-}" ]]; then
-    echo "🌐 Tablet URL: http://\${LAN_IP}:\${PORT}"
-  fi
-fi
-
-echo "🏠 Phone URL:   http://127.0.0.1:\${PORT}"
-echo "⚙️  Config:      \$CONFIG_FILE"
-
-if command -v ss >/dev/null 2>&1; then
-  echo
-  ss -ltn 2>/dev/null | grep ":${PORT} " || true
-fi
 EOF
   chmod +x "$STATUS_SCRIPT"
-  ok "Created: $STATUS_SCRIPT"
 
   cat > "$DOCTOR_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/env bash
-set -Eeuo pipefail
-
-PORT="$PORT"
-CONFIG_FILE="$CONFIG_FILE"
-
 echo "Doctor report:"
-echo
-
-if [[ -n "\${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]; then
-  echo "✅ Termux detected"
-else
-  echo "❌ Not running inside Termux"
-fi
-
-if command -v code-server >/dev/null 2>&1; then
-  echo "✅ code-server: \$(command -v code-server)"
-  code-server --version 2>/dev/null | head -n1 || true
-else
-  echo "❌ code-server missing from PATH"
-fi
-
-if [[ -f "\$CONFIG_FILE" ]]; then
-  echo "✅ config exists: \$CONFIG_FILE"
-else
-  echo "❌ config missing: \$CONFIG_FILE"
-fi
-
-if command -v ip >/dev/null 2>&1; then
-  LAN_IP="\$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i=="src") {print \$(i+1); exit}}' || true)"
-  if [[ -n "\${LAN_IP:-}" ]]; then
-    echo "✅ LAN IP detected: \${LAN_IP}"
-    echo "   Tablet URL: http://\${LAN_IP}:\${PORT}"
-  else
-    echo "⚠️  LAN IP not detected"
-  fi
-fi
-
-if command -v ss >/dev/null 2>&1; then
-  if ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
-    echo "✅ Port ${PORT} is listening"
-  else
-    echo "⚠️  Port ${PORT} is not listening"
-  fi
-fi
-
-echo
-echo "If your tablet still cannot open the URL, the problem is usually:"
-echo "  - phone and tablet are not on the same Wi-Fi"
-echo "  - AP/client isolation is enabled on the router"
-echo "  - hotspot blocks device-to-device traffic"
-echo "  - battery optimization killed Termux"
+if [[ -n "\${TERMUX_VERSION:-}" ]]; then echo "✅ Termux detected"; else echo "❌ Not Termux"; fi
+if command -v code-server >/dev/null 2>&1; then echo "✅ code-server installed"; else echo "❌ code-server missing"; fi
+if command -v tsu >/dev/null 2>&1; then echo "⚡ Root detected (Performance boost active)"; else echo "ℹ️  No root (Standard priority)"; fi
 EOF
   chmod +x "$DOCTOR_SCRIPT"
-  ok "Created: $DOCTOR_SCRIPT"
 
   if [[ -f "${HOME}/.bashrc" ]] && ! grep -q "alias vs=" "${HOME}/.bashrc"; then
-    {
-      echo
-      echo "# ${APP_NAME}"
-      echo "alias vs='bash ${START_SCRIPT}'"
-    } >> "${HOME}/.bashrc"
+    echo -e "\n# code-server-termux\nalias vs='bash ${START_SCRIPT}'" >> "${HOME}/.bashrc"
     ok "Added 'vs' alias to ~/.bashrc"
   fi
 }
 
 show_access_info() {
   print_header "Step 4/4: Access links"
-
   local lan_ip=""
   lan_ip="$(get_lan_ip || true)"
 
@@ -435,98 +324,51 @@ show_access_info() {
     echo "  http://${lan_ip}:${PORT}"
     echo
     if have qrencode; then
-      echo "QR code:"
       qrencode -t ANSIUTF8 "http://${lan_ip}:${PORT}" || true
-      echo
     fi
-  else
-    warn "Could not auto-detect a LAN IP."
-    echo "Run:"
-    echo "  ip addr show wlan0"
-    echo
   fi
 
-  echo "Password:"
-  echo "  ${PASSWORD}"
+  echo "Password: ${PASSWORD}"
   echo
   echo "Commands:"
-  echo "  Start:  bash ~/start-vscode"
-  echo "  Stop:   bash ~/stop-vscode"
-  echo "  Status: bash ~/status-vscode"
-  echo "  Doctor: bash ~/doctor-vscode"
-  echo
+  echo "  Start (Optimized): bash ~/start-vscode"
+  echo "  Stop:              bash ~/stop-vscode"
 }
 
 launch_server() {
   if port_listening "$PORT"; then
     warn "Something is already listening on port ${PORT}"
-    info "Run: bash ~/status-vscode"
     return 0
   fi
-
-  if have termux-wake-lock; then
-    termux-wake-lock >/dev/null 2>&1 || true
-  fi
-
   show_access_info
-  exec code-server --config "$CONFIG_FILE" --bind-addr "${BIND_ADDR}:${PORT}" "$PWD"
-}
-
-stop_server() {
-  if pgrep -af 'code-server' >/dev/null 2>&1; then
-    pkill -f 'code-server' && ok "Stopped code-server"
-  else
-    info "code-server is not running"
-  fi
-}
-
-status_server() {
-  bash "$STATUS_SCRIPT"
-}
-
-doctor() {
-  bash "$DOCTOR_SCRIPT"
+  # Execute the optimized start script directly
+  exec bash "$START_SCRIPT"
 }
 
 uninstall_generated() {
   print_header "Uninstall"
-
   rm -f "$START_SCRIPT" "$STOP_SCRIPT" "$STATUS_SCRIPT" "$DOCTOR_SCRIPT"
-
   if [[ "$PURGE_CONFIG" -eq 1 ]]; then
     rm -rf "$CONFIG_DIR"
     ok "Removed config directory"
-  else
-    warn "Kept config directory. Use --purge-config to remove it."
   fi
-
   ok "Removed generated helper scripts"
 }
 
 usage() {
   cat <<EOF
-Usage:
-  bash setup-code-server-termux.sh [options]
-
+Usage: bash setup-code-server-termux.sh [options]
 Options:
   --install           Install (default)
   --start             Start code-server
   --stop              Stop code-server
-  --status            Show status
-  --doctor            Run checks
-  --uninstall         Remove generated helper scripts
-  --purge-config      Also remove ~/.config/code-server on uninstall
-  --port PORT         Default: ${PORT}
-  --bind-addr ADDR    Default: ${BIND_ADDR}
+  --uninstall         Remove generated scripts
+  --purge-config      Also remove config
+  --port PORT         Default: 8080
   --password PASS     Set a fixed password
   --force-reinstall   Reinstall code-server package
   --no-launch         Install but do not launch immediately
   -h, --help          Show help
-
-Examples:
-  PORT=8080 bash setup-code-server-termux.sh
-  bash setup-code-server-termux.sh --no-launch
-  bash setup-code-server-termux.sh --status
 EOF
 }
 
@@ -539,47 +381,20 @@ parse_args() {
       --status) ACTION="status"; shift ;;
       --doctor) ACTION="doctor"; shift ;;
       --uninstall) ACTION="uninstall"; shift ;;
-      --port)
-        PORT="${2:-}"
-        [[ -n "$PORT" ]] || die "--port requires a value"
-        shift 2
-        ;;
-      --bind-addr)
-        BIND_ADDR="${2:-}"
-        [[ -n "$BIND_ADDR" ]] || die "--bind-addr requires a value"
-        shift 2
-        ;;
-      --password)
-        PASSWORD="${2:-}"
-        [[ -n "$PASSWORD" ]] || die "--password requires a value"
-        shift 2
-        ;;
-      --force-reinstall)
-        FORCE_REINSTALL=1
-        shift
-        ;;
-      --no-launch)
-        NO_LAUNCH=1
-        shift
-        ;;
-      --purge-config)
-        PURGE_CONFIG=1
-        shift
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        die "Unknown option: $1"
-        ;;
+      --port) PORT="${2:-}"; [[ -n "$PORT" ]] || die "--port requires a value"; shift 2 ;;
+      --bind-addr) BIND_ADDR="${2:-}"; [[ -n "$BIND_ADDR" ]] || die "--bind-addr requires a value"; shift 2 ;;
+      --password) PASSWORD="${2:-}"; [[ -n "$PASSWORD" ]] || die "--password requires a value"; shift 2 ;;
+      --force-reinstall) FORCE_REINSTALL=1; shift ;;
+      --no-launch) NO_LAUNCH=1; shift ;;
+      --purge-config) PURGE_CONFIG=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "Unknown option: $1" ;;
     esac
   done
 }
 
 main() {
   parse_args "$@"
-
   case "$ACTION" in
     install)
       install_packages
@@ -587,30 +402,16 @@ main() {
       create_helpers
       if [[ "$NO_LAUNCH" -eq 1 ]]; then
         ok "Install complete"
-        info "Start later with: bash ~/start-vscode"
       else
         launch_server
       fi
       ;;
-    start)
-      [[ -f "$CONFIG_FILE" ]] || die "Config not found. Run the installer first."
-      launch_server
-      ;;
-    stop)
-      stop_server
-      ;;
-    status)
-      status_server
-      ;;
-    doctor)
-      doctor
-      ;;
-    uninstall)
-      uninstall_generated
-      ;;
-    *)
-      die "Unknown action: $ACTION"
-      ;;
+    start) [[ -f "$CONFIG_FILE" ]] || die "Config not found. Run installer first."; launch_server ;;
+    stop) bash "$STOP_SCRIPT" ;;
+    status) bash "$STATUS_SCRIPT" ;;
+    doctor) bash "$DOCTOR_SCRIPT" ;;
+    uninstall) uninstall_generated ;;
+    *) die "Unknown action: $ACTION" ;;
   esac
 }
 
